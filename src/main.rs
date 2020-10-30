@@ -1,13 +1,15 @@
 use futures::future::TryFutureExt;
 use reqwest::{header::CONTENT_TYPE, ClientBuilder, StatusCode};
 use serde_json::{json, Value};
+use ssz::Decode;
 use std::ops::Range;
 use std::time::Duration;
 
-const START_BLOCK: u64 = 2758066;
-const END_BLOCK: u64 = 2797332;
-const DEPOSIT_CONTRACT: &'static str = "0x42cc0FcEB02015F145105Cf6f19F90e9BEa76558";
-const ENDPOINT: &'static str = "http://localhost:8547/";
+const START_BLOCK: u64 = 3085928;
+const END_BLOCK: u64 = 3666393;
+const DEPOSIT_CONTRACT: &'static str = "0x07b39F4fDE4A38bACe212b546dAc87C58DfE3fDC";
+const ENDPOINT: &'static str = "http://localhost:8545/";
+// const ENDPOINT: &'static str = "https://goerli.infura.io/v3/be3fb7ed377c418087602876a40affa1";
 
 /// `keccak("DepositEvent(bytes,bytes,bytes,bytes,bytes)")`
 pub const DEPOSIT_EVENT_TOPIC: &str =
@@ -178,11 +180,32 @@ fn strip_prefix(hex: &str) -> Result<&str, String> {
     }
 }
 
+/// The following constants define the layout of bytes in the deposit contract `DepositEvent`. The
+/// event bytes are formatted according to the  Ethereum ABI.
+const PUBKEY_START: usize = 192;
+const CREDS_START: usize = PUBKEY_START + 64 + 32;
+const AMOUNT_START: usize = CREDS_START + 32 + 32;
+const SIG_START: usize = AMOUNT_START + 32 + 32;
+const INDEX_START: usize = SIG_START + 96 + 32;
+const INDEX_LEN: usize = 8;
+
+/// Attempts to parse a raw `Log` from the deposit contract into a `DepositLog`.
+pub fn from_log(log: &Log) -> Result<u64, String> {
+    let bytes = &log.data;
+
+    let index = bytes
+        .get(INDEX_START..INDEX_START + INDEX_LEN)
+        .ok_or_else(|| "Insufficient bytes for index".to_string())?;
+
+    u64::from_ssz_bytes(index).map_err(|e| format!("Invalid index ssz: {:?}", e))
+}
+
+use std::cmp::Ordering;
 #[tokio::main]
 async fn main() {
     let range_chunks = (START_BLOCK..END_BLOCK)
         .collect::<Vec<u64>>()
-        .chunks(1000)
+        .chunks(100)
         .map(|vec| {
             let first = vec.first().cloned().unwrap_or_else(|| 0);
             let last = vec.last().map(|n| n + 1).unwrap_or_else(|| 0);
@@ -194,6 +217,8 @@ async fn main() {
         "Searching for deposit logs in range {}..{}",
         START_BLOCK, END_BLOCK,
     );
+
+    let mut indices: Vec<u64> = Vec::new();
     for range in range_chunks {
         let logs = get_deposit_logs_in_range(
             ENDPOINT,
@@ -203,11 +228,30 @@ async fn main() {
         )
         .await
         .unwrap();
-        println!(
-            "Found {} logs in range {} to {}",
-            logs.len(),
-            range.start,
-            range.end
-        );
+        // println!(
+        //     "Found {} logs in range {} to {}",
+        //     logs.len(),
+        //     range.start,
+        //     range.end
+        // );
+        for log in logs {
+            let index = from_log(&log).unwrap();
+            match index.cmp(&(indices.len() as u64)) {
+                Ordering::Equal => {
+                    indices.push(index);
+                    // println!("Index {}", index);
+                }
+                Ordering::Less => {
+                    // println!("Expected: {}, got: {}", indices.len(), index);
+                    if indices[index as usize] != index {
+                        panic!("Duplicate distinct log {}", index);
+                    }
+                }
+                Ordering::Greater => {
+                    println!("Non consecutive: {} {}", index, indices.len());
+                    panic!("Non consecutive");
+                }
+            }
+        }
     }
 }
