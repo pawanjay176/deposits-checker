@@ -200,12 +200,11 @@ pub fn from_log(log: &Log) -> Result<u64, String> {
     u64::from_ssz_bytes(index).map_err(|e| format!("Invalid index ssz: {:?}", e))
 }
 
-use std::cmp::Ordering;
 #[tokio::main]
 async fn main() {
     let range_chunks = (START_BLOCK..END_BLOCK)
         .collect::<Vec<u64>>()
-        .chunks(100)
+        .chunks(1000)
         .map(|vec| {
             let first = vec.first().cloned().unwrap_or_else(|| 0);
             let last = vec.last().map(|n| n + 1).unwrap_or_else(|| 0);
@@ -218,7 +217,7 @@ async fn main() {
         START_BLOCK, END_BLOCK,
     );
 
-    let mut indices: Vec<u64> = Vec::new();
+    // let mut indices: Vec<u64> = Vec::new();
     for range in range_chunks {
         let logs = get_deposit_logs_in_range(
             ENDPOINT,
@@ -228,30 +227,83 @@ async fn main() {
         )
         .await
         .unwrap();
+
         // println!(
         //     "Found {} logs in range {} to {}",
         //     logs.len(),
         //     range.start,
         //     range.end
         // );
-        for log in logs {
-            let index = from_log(&log).unwrap();
-            match index.cmp(&(indices.len() as u64)) {
-                Ordering::Equal => {
-                    indices.push(index);
-                    // println!("Index {}", index);
-                }
-                Ordering::Less => {
-                    // println!("Expected: {}, got: {}", indices.len(), index);
-                    if indices[index as usize] != index {
-                        panic!("Duplicate distinct log {}", index);
-                    }
-                }
-                Ordering::Greater => {
-                    println!("Non consecutive: {} {}", index, indices.len());
-                    panic!("Non consecutive");
-                }
-            }
+
+        let chunked_range = range
+            .clone()
+            .collect::<Vec<u64>>()
+            .chunks(100)
+            .map(|vec| {
+                let first = vec.first().cloned().unwrap_or_else(|| 0);
+                let last = vec.last().cloned().unwrap_or_else(|| 0);
+                first..last
+            })
+            .collect::<Vec<Range<u64>>>();
+
+        let mut chunked_len = 0;
+        for (i, range) in chunked_range.iter().enumerate() {
+            let l = if i == 9 {
+                let new_range = range.start..range.end + 1;
+                // println!("New range: {:?}", new_range);
+                get_deposit_logs_in_range(
+                    ENDPOINT,
+                    DEPOSIT_CONTRACT,
+                    new_range,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+                .len()
+            } else {
+                get_deposit_logs_in_range(
+                    ENDPOINT,
+                    DEPOSIT_CONTRACT,
+                    range.clone(),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+                .len()
+            };
+            // println!(
+            //     "Found {} logs in subrange {} to {}",
+            //     l, range.start, range.end
+            // );
+            chunked_len += l;
         }
+
+        println!(
+            "{} logs in range: {:?}, {} logs in sum of subrange",
+            chunked_len,
+            range,
+            logs.len()
+        );
+        // assert_eq!(chunked_len, logs.len());
+
+        // for log in logs {
+        //     let index = from_log(&log).unwrap();
+        //     match index.cmp(&(indices.len() as u64)) {
+        //         Ordering::Equal => {
+        //             indices.push(index);
+        //             // println!("Index {}", index);
+        //         }
+        //         Ordering::Less => {
+        //             // println!("Expected: {}, got: {}", indices.len(), index);
+        //             if indices[index as usize] != index {
+        //                 println!("Duplicate distinct log {}", index);
+        //             }
+        //         }
+        //         Ordering::Greater => {
+        //             println!("Non consecutive: {} {}", index, indices.len());
+        //             // panic!("Non consecutive");
+        //         }
+        //     }
+        // }
     }
 }
