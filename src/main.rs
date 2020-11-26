@@ -1,15 +1,13 @@
 use futures::future::TryFutureExt;
 use reqwest::{header::CONTENT_TYPE, ClientBuilder, StatusCode};
 use serde_json::{json, Value};
-use ssz::Decode;
 use std::ops::Range;
 use std::time::Duration;
 
-const START_BLOCK: u64 = 3085928;
-const END_BLOCK: u64 = 3666393;
-const DEPOSIT_CONTRACT: &'static str = "0x07b39F4fDE4A38bACe212b546dAc87C58DfE3fDC";
+const START_BLOCK: u64 = 11184524;
+const END_BLOCK: u64 = 11332850;
+const DEPOSIT_CONTRACT: &'static str = "0x00000000219ab540356cBB839Cbe05303d7705Fa";
 const ENDPOINT: &'static str = "http://localhost:8545/";
-// const ENDPOINT: &'static str = "https://goerli.infura.io/v3/be3fb7ed377c418087602876a40affa1";
 
 /// `keccak("DepositEvent(bytes,bytes,bytes,bytes,bytes)")`
 pub const DEPOSIT_EVENT_TOPIC: &str =
@@ -42,7 +40,7 @@ pub async fn get_deposit_logs_in_range(
     address: &str,
     block_height_range: Range<u64>,
     timeout: Duration,
-) -> Result<Vec<Log>, String> {
+) -> Result<Vec<Value>, String> {
     let params = json! ([{
         "address": address,
         "topics": [DEPOSIT_EVENT_TOPIC],
@@ -51,32 +49,12 @@ pub async fn get_deposit_logs_in_range(
     }]);
 
     let response_body = send_rpc_request(endpoint, "eth_getLogs", params, timeout).await?;
-    response_result(&response_body)?
+    let array = response_result(&response_body)?
         .ok_or_else(|| "No result field was returned for deposit logs".to_string())?
         .as_array()
         .cloned()
-        .ok_or_else(|| "'result' value was not an array".to_string())?
-        .into_iter()
-        .map(|value| {
-            let block_number = value
-                .get("blockNumber")
-                .ok_or_else(|| "No block number field in log")?
-                .as_str()
-                .ok_or_else(|| "Block number was not string")?;
-
-            let data = value
-                .get("data")
-                .ok_or_else(|| "No block number field in log")?
-                .as_str()
-                .ok_or_else(|| "Data was not string")?;
-
-            Ok(Log {
-                block_number: hex_to_u64_be(&block_number)?,
-                data: hex_to_bytes(data)?,
-            })
-        })
-        .collect::<Result<Vec<Log>, String>>()
-        .map_err(|e| format!("Failed to get logs in range: {}", e))
+        .ok_or_else(|| "'result' value was not an array".to_string());
+    array
 }
 
 /// Sends an RPC request to `endpoint`, using a POST with the given `body`.
@@ -153,53 +131,6 @@ fn response_result(response: &str) -> Result<Option<Value>, String> {
     }
 }
 
-/// Parses a `0x`-prefixed, **big-endian** hex string as a u64.
-///
-/// Note: the JSON-RPC encodes integers as big-endian. The deposit contract uses little-endian.
-/// Therefore, this function is only useful for numbers encoded by the JSON RPC.
-///
-/// E.g., `0x01 == 1`
-fn hex_to_u64_be(hex: &str) -> Result<u64, String> {
-    u64::from_str_radix(strip_prefix(hex)?, 16)
-        .map_err(|e| format!("Failed to parse hex as u64: {:?}", e))
-}
-
-/// Parses a `0x`-prefixed, big-endian hex string as bytes.
-///
-/// E.g., `0x0102 == vec![1, 2]`
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    hex::decode(strip_prefix(hex)?).map_err(|e| format!("Failed to parse hex as bytes: {:?}", e))
-}
-
-/// Removes the `0x` prefix from some bytes. Returns an error if the prefix is not present.
-fn strip_prefix(hex: &str) -> Result<&str, String> {
-    if hex.starts_with("0x") {
-        Ok(&hex[2..])
-    } else {
-        Err("Hex string did not start with `0x`".to_string())
-    }
-}
-
-/// The following constants define the layout of bytes in the deposit contract `DepositEvent`. The
-/// event bytes are formatted according to the  Ethereum ABI.
-const PUBKEY_START: usize = 192;
-const CREDS_START: usize = PUBKEY_START + 64 + 32;
-const AMOUNT_START: usize = CREDS_START + 32 + 32;
-const SIG_START: usize = AMOUNT_START + 32 + 32;
-const INDEX_START: usize = SIG_START + 96 + 32;
-const INDEX_LEN: usize = 8;
-
-/// Attempts to parse a raw `Log` from the deposit contract into a `DepositLog`.
-pub fn from_log(log: &Log) -> Result<u64, String> {
-    let bytes = &log.data;
-
-    let index = bytes
-        .get(INDEX_START..INDEX_START + INDEX_LEN)
-        .ok_or_else(|| "Insufficient bytes for index".to_string())?;
-
-    u64::from_ssz_bytes(index).map_err(|e| format!("Invalid index ssz: {:?}", e))
-}
-
 #[tokio::main]
 async fn main() {
     let range_chunks = (START_BLOCK..END_BLOCK)
@@ -228,82 +159,6 @@ async fn main() {
         .await
         .unwrap();
 
-        // println!(
-        //     "Found {} logs in range {} to {}",
-        //     logs.len(),
-        //     range.start,
-        //     range.end
-        // );
-
-        let chunked_range = range
-            .clone()
-            .collect::<Vec<u64>>()
-            .chunks(100)
-            .map(|vec| {
-                let first = vec.first().cloned().unwrap_or_else(|| 0);
-                let last = vec.last().cloned().unwrap_or_else(|| 0);
-                first..last
-            })
-            .collect::<Vec<Range<u64>>>();
-
-        let mut chunked_len = 0;
-        for (i, range) in chunked_range.iter().enumerate() {
-            let l = if i == 9 {
-                let new_range = range.start..range.end + 1;
-                // println!("New range: {:?}", new_range);
-                get_deposit_logs_in_range(
-                    ENDPOINT,
-                    DEPOSIT_CONTRACT,
-                    new_range,
-                    Duration::from_secs(5),
-                )
-                .await
-                .unwrap()
-                .len()
-            } else {
-                get_deposit_logs_in_range(
-                    ENDPOINT,
-                    DEPOSIT_CONTRACT,
-                    range.clone(),
-                    Duration::from_secs(5),
-                )
-                .await
-                .unwrap()
-                .len()
-            };
-            // println!(
-            //     "Found {} logs in subrange {} to {}",
-            //     l, range.start, range.end
-            // );
-            chunked_len += l;
-        }
-
-        println!(
-            "{} logs in range: {:?}, {} logs in sum of subrange",
-            chunked_len,
-            range,
-            logs.len()
-        );
-        // assert_eq!(chunked_len, logs.len());
-
-        // for log in logs {
-        //     let index = from_log(&log).unwrap();
-        //     match index.cmp(&(indices.len() as u64)) {
-        //         Ordering::Equal => {
-        //             indices.push(index);
-        //             // println!("Index {}", index);
-        //         }
-        //         Ordering::Less => {
-        //             // println!("Expected: {}, got: {}", indices.len(), index);
-        //             if indices[index as usize] != index {
-        //                 println!("Duplicate distinct log {}", index);
-        //             }
-        //         }
-        //         Ordering::Greater => {
-        //             println!("Non consecutive: {} {}", index, indices.len());
-        //             // panic!("Non consecutive");
-        //         }
-        //     }
-        // }
+        println!("{} logs in range {:?}", logs.len(), range);
     }
 }
