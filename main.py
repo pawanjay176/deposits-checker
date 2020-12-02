@@ -1,3 +1,6 @@
+# Usage
+# python3 main.py <TO-CHECK-ENDPOINT> <TRUSTED-ENDPOINT>
+
 import requests
 import json
 import sys
